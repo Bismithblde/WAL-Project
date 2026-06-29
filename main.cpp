@@ -4,6 +4,7 @@
 #include <fstream>
 #include <sstream>
 #include <filesystem>
+#include <WinSock2.h>
 using namespace std;
 
 unordered_map<string, string> memTable;
@@ -54,6 +55,8 @@ void handle_compact() {
 }
 
 void initWal() {
+
+
     string line;
     ifstream File("wal.txt");
 
@@ -81,11 +84,44 @@ void initWal() {
 }
 int main() {
 
+
+
     string input = "";
     bool inLoop = true;
     
     initWal();
-    
+
+    // init socket:
+    WSADATA wsaData = {0};
+    int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (iResult != 0) {
+        cout << "Socket Startup Failed.\n";
+        return;
+    }
+    SOCKET server_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_socket == INVALID_SOCKET) {
+        cout << "Socket creation failed.\n";
+        WSACleanup();
+        return 1;
+    }
+    sockaddr_in serveraddr;
+    serveraddr.sin_family = AF_INET;
+    serveraddr.sin_port = htons(6379);
+    serveraddr.sin_addr.s_addr = INADDR_ANY;
+
+    if (::bind(server_socket, (struct sockaddr*)&serveraddr, sizeof(serveraddr)) == SOCKET_ERROR) {
+        cout << "BIND FAILED: " << WSAGetLastError() << "\n";
+        closesocket(server_socket);
+        WSACleanup();
+        return 1;
+    }
+
+    if (listen(server_socket, SOMAXCONN) == SOCKET_ERROR) {
+        cout << "FAILED TO LISTEN SOCKET: " << WSAGetLastError() << "\n";
+        WSACleanup();
+        return 1;
+    }
+
     while (true) {
         cin >> input;
         if (command_map.find(input) != command_map.end()) {
