@@ -3,6 +3,7 @@
 #include <functional>
 #include <fstream>
 #include <sstream>
+#include <filesystem>
 using namespace std;
 
 unordered_map<string, string> memTable;
@@ -32,6 +33,25 @@ void handle_set() {
     File.close();
 }
 
+void handle_compact() {
+    ofstream TempFile("wal.tmp");
+    if (!TempFile.is_open()) {
+        cout << "Error Opening Temp File";
+        return;
+    }
+
+    for (auto const& [key, value] : memTable) {
+        TempFile << "SET " + key + " " + value + "\n";
+    }
+
+    TempFile.close();
+
+    try {
+        filesystem::rename("wal.tmp", "wal.txt");
+    } catch (const filesystem::filesystem_error& e){
+        cout << "ERROR: Atomic swap failed: " << e.what() << "\n";
+    }
+}
 
 void initWal() {
     string line;
@@ -40,14 +60,18 @@ void initWal() {
     command_map["GET"] = handle_get;
     command_map["EXIT"] = handle_exit;
     command_map["SET"] = handle_set;
-
+    command_map["COMPACT"] = handle_compact;
 
     while (getline(File, line)) {
-        // get first word
-        string command = line.substr(0, line.find(" "));
+        if (line.empty()) {
+            continue;
+        }
+        istringstream iss(line);
+
+        string command;
+        iss >> command;
+
         if (command == "SET") {
-            string keyValue = line.substr(line.find(" ")+1);
-            istringstream iss(keyValue);
             string key, value;
             iss >> key >> value;
 

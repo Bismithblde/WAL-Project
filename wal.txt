@@ -1,2 +1,3 @@
+SET  
+SET plant rose
 SET animal cat
-SET animal dog
