@@ -1,0 +1,2 @@
+SET animal cat
+SET animal dog
