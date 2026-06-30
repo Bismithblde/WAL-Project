@@ -96,7 +96,7 @@ int main() {
     int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
     if (iResult != 0) {
         cout << "Socket Startup Failed.\n";
-        return;
+        return 1;
     }
     SOCKET server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (server_socket == INVALID_SOCKET) {
@@ -122,6 +122,19 @@ int main() {
         return 1;
     }
 
+    sockaddr_in clientaddr;
+    int clientaddr_size = sizeof(clientaddr);
+    SOCKET client_socket = accept(server_socket, (sockaddr*)&clientaddr, &clientaddr_size);
+
+    if (client_socket == INVALID_SOCKET) {
+        cout << "ACCEPT FAILED: " << WSAGetLastError() << "\n";
+
+        closesocket(server_socket);
+        WSACleanup();
+        return 1;
+    }
+
+    cout << "Connection Successful \n";
     while (true) {
         cin >> input;
         if (command_map.find(input) != command_map.end()) {
