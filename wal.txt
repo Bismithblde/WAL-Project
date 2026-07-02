@@ -1,3 +1,0 @@
-SET  
-SET plant rose
-SET animal cat

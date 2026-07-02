@@ -8,11 +8,12 @@
 using namespace std;
 
 unordered_map<string, string> memTable;
-unordered_map<string, function<void()>> command_map;
+unordered_map<string, function<void(istringstream&)>> command_map;
 
-void handle_get() {
+// Test-NetConnection 127.0.0.1 -Port 6379
+void handle_get(istringstream &ISS) {
     string key;
-    cin >> key; 
+    ISS >> key; 
     
     if (memTable.find(key) != memTable.end()) {
         cout << memTable[key] << "\n";
@@ -21,20 +22,20 @@ void handle_get() {
     }
 }
 
-void handle_exit() {
+void handle_exit(istringstream &ISS) {
     exit(0); 
 }
 
-void handle_set() {
+void handle_set(istringstream &ISS) {
     string key, value;
-    cin >> key >> value;
+    ISS >> key >> value;
     memTable[key] = value;
     ofstream File("wal.txt", ios::app);
     File << "SET " + key + " " + value << "\n";
     File.close();
 }
 
-void handle_compact() {
+void handle_compact(istringstream &ISS) {
     ofstream TempFile("wal.tmp");
     if (!TempFile.is_open()) {
         cout << "Error Opening Temp File";
@@ -54,6 +55,13 @@ void handle_compact() {
     }
 }
 
+void handle_delete(istringstream &ISS) {
+    string key;
+    ISS >> key;
+    memTable.erase(key);
+    handle_compact(ISS);
+}
+
 void initWal() {
 
 
@@ -64,6 +72,7 @@ void initWal() {
     command_map["EXIT"] = handle_exit;
     command_map["SET"] = handle_set;
     command_map["COMPACT"] = handle_compact;
+    command_map["DELETE"] = handle_delete;
 
     while (getline(File, line)) {
         if (line.empty()) {
@@ -135,15 +144,32 @@ int main() {
     }
 
     cout << "Connection Successful \n";
+    string accumulator = "";
     while (true) {
-        cin >> input;
-        if (command_map.find(input) != command_map.end()) {
-            command_map[input]();
-            
+        char buffer[512];
+        memset(buffer, 0, sizeof(buffer));
+        int bytes_received = recv(client_socket,  buffer, sizeof(buffer) - 1, 0);
+        if (bytes_received <= 0) { 
+                cout << "No bytes received!" << endl;
+                break;
         }
-        else {
-            cout << "Invalid Input \n";
+        accumulator.append(buffer, bytes_received);
+        if (accumulator.find("\n") != -1) {
+            istringstream ISS(accumulator);
+            string command;
+            ISS >> command;
+
+            if (command_map.find(command) != command_map.end()) {
+                command_map[command](ISS);
+            }
+            else {
+                cout << "Invalid Command Entered.\n";
+            }
+            accumulator = "";
         }
     }
+
+    closesocket(server_socket);
+    WSACleanup();
     return 0;
 }
