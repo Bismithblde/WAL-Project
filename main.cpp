@@ -9,16 +9,32 @@
 #include <mutex>
 using namespace std;
 
+enum class ClientState {
+    COMMAND_MODE,
+    SUBSCRIBE_MODE
+};
+
+struct ClientContext {
+    SOCKET socket;
+    ClientState state = ClientState::COMMAND_MODE;
+};
+
 unordered_map<string, string> memTable;
-unordered_map<string, function<void(istringstream&, SOCKET)>> command_map;
+unordered_map<string, function<void(istringstream&, shared_ptr<ClientContext>)>> command_map;
+unordered_map<string, vector<SOCKET>> channel_map;
 std::mutex db_mutex;
+std::mutex pubsub_mutex;
+
+
+
 
 // Test-NetConnection 127.0.0.1 -Port 6379
 void send_response(SOCKET client_socket, string message) {
     send(client_socket, message.c_str(), static_cast<int>(message.length()), 0);
 }
 
-void handle_get(istringstream &ISS, SOCKET client_socket) {
+void handle_get(istringstream &ISS, shared_ptr<ClientContext> client_context) {
+    SOCKET client_socket = client_context-> socket;
     lock_guard<std::mutex> lock(db_mutex);
     string key;
     ISS >> key; 
@@ -30,7 +46,8 @@ void handle_get(istringstream &ISS, SOCKET client_socket) {
     }
 }
 
-void handle_set(istringstream &ISS, SOCKET client_socket) {
+void handle_set(istringstream &ISS, shared_ptr<ClientContext> client_context) {
+    SOCKET client_socket = client_context-> socket;
     lock_guard<std::mutex> lock(db_mutex);
     string key, value;
     ISS >> key >> value;
@@ -50,7 +67,8 @@ void handle_set(istringstream &ISS, SOCKET client_socket) {
     send_response(client_socket, "OK\n");
 }
 
-void handle_compact(istringstream &ISS, SOCKET client_socket) {
+void handle_compact(istringstream &ISS, shared_ptr<ClientContext> client_context) {
+    SOCKET client_socket = client_context-> socket;
     lock_guard<std::mutex> lock(db_mutex);
     ofstream TempFile("wal.tmp");
     if (!TempFile.is_open()) {
@@ -72,14 +90,27 @@ void handle_compact(istringstream &ISS, SOCKET client_socket) {
     }
 }
 
-void handle_delete(istringstream &ISS, SOCKET client_socket) {
+void handle_delete(istringstream &ISS, shared_ptr<ClientContext> client_context) {
+    SOCKET client_socket = client_context -> socket;
     {
         lock_guard<std::mutex> lock(db_mutex);
         string key;
         ISS >> key;
         memTable.erase(key);
     }
-    handle_compact(ISS, client_socket);
+    handle_compact(ISS, client_context);
+}
+
+void handle_subscribe(istringstream &ISS, shared_ptr<ClientContext> client_context) {
+    SOCKET client_socket = client_context->socket;
+    string channel;
+    ISS >> channel;
+
+    if (channel_map.find(channel) != channel_map.end()) {
+        lock_guard<std::mutex> lock(pubsub_mutex);
+        channel_map[channel].emplace_back(client_socket);
+    }
+
 }
 
 void initWal() {
@@ -109,7 +140,8 @@ void initWal() {
     }
 }
 
-void workerFunction(SOCKET client_socket) {
+void workerFunction(shared_ptr<ClientContext> client_context) {
+    SOCKET client_socket = client_context->socket;
     string accumulator = "";
     while (true) {
         char buffer[512];
@@ -141,7 +173,7 @@ void workerFunction(SOCKET client_socket) {
                 }
 
                 if (command_map.find(command) != command_map.end()) {
-                    command_map[command](ISS, client_socket);
+                    command_map[command](ISS, client_context);
                 }
                 else {
                     send_response(client_socket, "ERR: Invalid Command Entered: " + command + "\n");
@@ -191,12 +223,14 @@ int main() {
         sockaddr_in clientaddr;
         int clientaddr_size = sizeof(clientaddr);
         SOCKET client_socket = accept(server_socket, (sockaddr*)&clientaddr, &clientaddr_size);
+        auto client = std::make_shared<ClientContext>(ClientContext{ client_socket, ClientState::COMMAND_MODE });
+
         if (client_socket == INVALID_SOCKET) {
             cout << "ACCEPT FAILED: " << WSAGetLastError() << "\n";
             continue;
         }
         cout << "Connection Successful \n";
-        thread wt(workerFunction, client_socket);
+        thread wt(workerFunction, client);
         wt.detach();
     }
 
