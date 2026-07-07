@@ -24,7 +24,7 @@ void handle_get(istringstream &ISS, SOCKET client_socket) {
     ISS >> key; 
     
     if (memTable.find(key) != memTable.end()) {
-        send_response(client_socket, memTable[key] + "\n"); // Sent to client instead of server console
+        send_response(client_socket, memTable[key] + "\n"); 
     } else {
         send_response(client_socket, "(nil)\n");
     }
@@ -47,7 +47,7 @@ void handle_set(istringstream &ISS, SOCKET client_socket) {
     File << "SET " + key + " " + value << "\n";
     File.close();
     
-    send_response(client_socket, "OK\n"); // Let the client know it worked
+    send_response(client_socket, "OK\n");
 }
 
 void handle_compact(istringstream &ISS, SOCKET client_socket) {
