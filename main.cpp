@@ -7,6 +7,8 @@
 #include <WinSock2.h>
 #include <thread>
 #include <mutex>
+#include <vector>
+#include <algorithm>
 using namespace std;
 
 enum class ClientState {
@@ -34,6 +36,10 @@ void send_response(SOCKET client_socket, string message) {
 }
 
 void handle_get(istringstream &ISS, shared_ptr<ClientContext> client_context) {
+    if (client_context->state == ClientState::SUBSCRIBE_MODE) {
+        send_response(client_context->socket, "Failed Command: In Subcribe Mode;\nSend \'EXITSUB\' to exit.");
+        return;
+    }
     SOCKET client_socket = client_context-> socket;
     lock_guard<std::mutex> lock(db_mutex);
     string key;
@@ -47,6 +53,10 @@ void handle_get(istringstream &ISS, shared_ptr<ClientContext> client_context) {
 }
 
 void handle_set(istringstream &ISS, shared_ptr<ClientContext> client_context) {
+    if (client_context->state == ClientState::SUBSCRIBE_MODE) {
+        send_response(client_context->socket, "Failed Command: In Subcribe Mode;\nSend \'EXITSUB\' to exit.");
+        return;
+    }
     SOCKET client_socket = client_context-> socket;
     lock_guard<std::mutex> lock(db_mutex);
     string key, value;
@@ -68,6 +78,10 @@ void handle_set(istringstream &ISS, shared_ptr<ClientContext> client_context) {
 }
 
 void handle_compact(istringstream &ISS, shared_ptr<ClientContext> client_context) {
+    if (client_context->state == ClientState::SUBSCRIBE_MODE) {
+        send_response(client_context->socket, "Failed Command: In Subcribe Mode;\nSend \'EXITSUB\' to exit.");
+        return;
+    }
     SOCKET client_socket = client_context-> socket;
     lock_guard<std::mutex> lock(db_mutex);
     ofstream TempFile("wal.tmp");
@@ -91,6 +105,10 @@ void handle_compact(istringstream &ISS, shared_ptr<ClientContext> client_context
 }
 
 void handle_delete(istringstream &ISS, shared_ptr<ClientContext> client_context) {
+    if (client_context->state == ClientState::SUBSCRIBE_MODE) {
+        send_response(client_context->socket, "Failed Command: In Subcribe Mode;\nSend \'EXITSUB\' to exit.");
+        return;
+    }
     SOCKET client_socket = client_context -> socket;
     {
         lock_guard<std::mutex> lock(db_mutex);
@@ -105,11 +123,55 @@ void handle_subscribe(istringstream &ISS, shared_ptr<ClientContext> client_conte
     SOCKET client_socket = client_context->socket;
     string channel;
     ISS >> channel;
-
-    if (channel_map.find(channel) != channel_map.end()) {
+    if (channel.empty()) {
+        return;
+    }
+    {
         lock_guard<std::mutex> lock(pubsub_mutex);
         channel_map[channel].emplace_back(client_socket);
+        client_context->state = ClientState::SUBSCRIBE_MODE;
     }
+    
+
+    string reply = "*3\r\n$9\r\nsubscribe\r\n$" + to_string(channel.length()) 
+                   + "\r\n" + channel + "\r\n:1\r\n";
+    send_response(client_context->socket, reply);
+}
+void handle_publish(istringstream &ISS, shared_ptr<ClientContext> client_context) {
+    string channel, message;
+    ISS >> channel;
+    getline(ISS, message);
+    if (!message.empty() && message[0] == ' ') {
+        message.erase(0, 1);
+    }
+
+    if (channel.empty() || message.empty()) {
+        send_response(client_context->socket, "-ERR Channel or Message Empty\r\n");
+        return;
+    }
+
+    vector<SOCKET> targets;
+    {
+        lock_guard<::mutex> lock(pubsub_mutex);
+        if (channel_map.find(channel) != channel_map.end()) {
+            targets = channel_map[channel];
+        }
+    }
+
+    string resp_msg = "*3\r\n$7\r\nmessage\r\n$" + to_string(channel.length()) 
+                      + "\r\n" + channel + "\r\n$" + to_string(message.length()) 
+                      + "\r\n" + message + "\r\n";
+    
+    int active_rec = 0;
+    for (SOCKET sub_socket : targets) {
+        int res = send(sub_socket, resp_msg.c_str(), static_cast<int>(resp_msg.length()), 0);
+        if (res != SOCKET_ERROR) {
+            active_rec++;
+        }
+    }
+
+    string pub_reply = ":" + to_string(active_rec) + "\r\n";
+    send_response(client_context->socket, pub_reply);
 
 }
 
@@ -121,6 +183,8 @@ void initWal() {
     command_map["SET"] = handle_set;
     command_map["COMPACT"] = handle_compact;
     command_map["DELETE"] = handle_delete;
+    command_map["SUBSCRIBE"] = handle_subscribe;
+    command_map["PUBLISH"] = handle_publish;
 
     while (getline(File, line)) {
         if (line.empty()) {
@@ -148,9 +212,16 @@ void workerFunction(shared_ptr<ClientContext> client_context) {
         memset(buffer, 0, sizeof(buffer));
         int bytes_received = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
         if (bytes_received <= 0) { 
-                cout << "Client disconnected." << endl;
-                closesocket(client_socket);
-                break;
+            cout << "Client disconnected." << endl;
+            
+            {
+                lock_guard<std::mutex> lock(pubsub_mutex);
+                for (auto& [channel, vec] : channel_map) {
+                    vec.erase(remove(vec.begin(), vec.end(), client_socket), vec.end());
+                }
+            }
+            closesocket(client_socket);
+            break;
         }
         accumulator.append(buffer, bytes_received);
 
@@ -172,11 +243,21 @@ void workerFunction(shared_ptr<ClientContext> client_context) {
                     return;
                 }
 
-                if (command_map.find(command) != command_map.end()) {
-                    command_map[command](ISS, client_context);
-                }
+                if (client_context->state == ClientState::SUBSCRIBE_MODE) {
+                    if (command == "SUBSCRIBE") {
+                        handle_subscribe(ISS, client_context);
+                    } else if (command == "EXITSUB") {
+                        // implement later
+                    } else {
+                        send_response(client_socket, "Failed Command: In Subscribe Mode;\nSend 'EXITSUB' to exit.\n");
+                    }
+                } 
                 else {
-                    send_response(client_socket, "ERR: Invalid Command Entered: " + command + "\n");
+                    if (command_map.find(command) != command_map.end()) {
+                        command_map[command](ISS, client_context);
+                    } else {
+                        send_response(client_socket, "ERR: Invalid Command Entered: " + command + "\n");
+                    }
                 }
             }
         }
