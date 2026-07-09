@@ -9,6 +9,7 @@
 #include <mutex>
 #include <vector>
 #include <algorithm>
+#include <queue>
 using namespace std;
 
 enum class ClientState {
@@ -26,7 +27,7 @@ unordered_map<string, function<void(istringstream&, shared_ptr<ClientContext>)>>
 unordered_map<string, vector<SOCKET>> channel_map;
 std::mutex db_mutex;
 std::mutex pubsub_mutex;
-
+queue<shared_ptr<ClientContext>> workers_queue;
 
 
 
@@ -305,12 +306,13 @@ int main() {
         int clientaddr_size = sizeof(clientaddr);
         SOCKET client_socket = accept(server_socket, (sockaddr*)&clientaddr, &clientaddr_size);
         auto client = std::make_shared<ClientContext>(ClientContext{ client_socket, ClientState::COMMAND_MODE });
-
+        
         if (client_socket == INVALID_SOCKET) {
             cout << "ACCEPT FAILED: " << WSAGetLastError() << "\n";
             continue;
         }
-        cout << "Connection Successful \n";
+        workers_queue.push(client);
+        cout << "Socket Waiting in Queue. \n";
         thread wt(workerFunction, client);
         wt.detach();
     }
