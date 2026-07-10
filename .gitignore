@@ -1,2 +1,4 @@
-wal.txt
-*.exe
+main.exe
+learning_flat_map.exe
+vcpkg_installed/
+tests/__pycache__/
