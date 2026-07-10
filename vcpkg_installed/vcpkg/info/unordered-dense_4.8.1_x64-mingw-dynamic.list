@@ -1,0 +1,14 @@
+x64-mingw-dynamic/
+x64-mingw-dynamic/include/
+x64-mingw-dynamic/include/ankerl/
+x64-mingw-dynamic/include/ankerl/stl.h
+x64-mingw-dynamic/include/ankerl/unordered_dense.h
+x64-mingw-dynamic/share/
+x64-mingw-dynamic/share/unordered-dense/
+x64-mingw-dynamic/share/unordered-dense/copyright
+x64-mingw-dynamic/share/unordered-dense/vcpkg.spdx.json
+x64-mingw-dynamic/share/unordered-dense/vcpkg_abi_info.txt
+x64-mingw-dynamic/share/unordered_dense/
+x64-mingw-dynamic/share/unordered_dense/unordered_denseConfig.cmake
+x64-mingw-dynamic/share/unordered_dense/unordered_denseConfigVersion.cmake
+x64-mingw-dynamic/share/unordered_dense/unordered_denseTargets.cmake
