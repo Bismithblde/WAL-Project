@@ -1,5 +1,4 @@
 #include <ThreadSafeQueue.h>
-#include <main>
 
 void ThreadSafeQueue::enqueue(std::shared_ptr<ClientContext> client) {
     std::unique_lock<std::mutex> lock(mtx);
@@ -9,8 +8,9 @@ void ThreadSafeQueue::enqueue(std::shared_ptr<ClientContext> client) {
 
 std::shared_ptr<ClientContext> ThreadSafeQueue::dequeue() {
     std::unique_lock<std::mutex> lock(mtx);
+    cv.wait(lock, [this]() { return !raw_queue.empty(); });
+
+    auto client = raw_queue.front();
     raw_queue.pop();
-    while (raw_queue.empty()) {
-        cv.
-    }
+    return client;
 }

@@ -102,7 +102,7 @@ class ServerProcess:
 
 def build_server(repo_root: Path) -> Path:
     exe_path = repo_root / "main.exe"
-    compile_cmd = ["g++", "main.cpp", "-O2", "-DNDEBUG", "-o", str(exe_path), "-lws2_32"]
+    compile_cmd = ["g++", "src/main.cpp", "src/ThreadSafeQueue.cpp", "-O2", "-DNDEBUG", "-Iinclude", "-o", str(exe_path), "-lws2_32"]
     subprocess.run(compile_cmd, cwd=repo_root, check=True)
     return exe_path
 

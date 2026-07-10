@@ -9,7 +9,10 @@
 #include <mutex>
 #include <vector>
 #include <algorithm>
-#include <queue>
+#include <memory>
+#include <atomic>
+#include <chrono>
+#include <shared_mutex>
 #include <ThreadSafeQueue.h>
 using namespace std;
 
@@ -21,16 +24,24 @@ enum class ClientState {
 struct ClientContext {
     SOCKET socket;
     ClientState state = ClientState::COMMAND_MODE;
+    string accumulator;
+    bool queued = false;
+    bool connected = true;
+    mutex mtx;
 };
 
 unordered_map<string, string> memTable;
 unordered_map<string, function<void(istringstream&, shared_ptr<ClientContext>)>> command_map;
 unordered_map<string, vector<SOCKET>> channel_map;
-std::mutex db_mutex;
+std::shared_mutex db_mutex;
 std::mutex pubsub_mutex;
+vector<shared_ptr<ClientContext>> clients;
+std::mutex clients_mutex;
 ThreadSafeQueue workers_queue;
 atomic<int> active_worker_count(0);
 
+void setSocketNonBlocking(SOCKET socket);
+void disconnect_client(shared_ptr<ClientContext> client_context);
 
 // Test-NetConnection 127.0.0.1 -Port 6379
 void send_response(SOCKET client_socket, string message) {
@@ -43,7 +54,7 @@ void handle_get(istringstream &ISS, shared_ptr<ClientContext> client_context) {
         return;
     }
     SOCKET client_socket = client_context-> socket;
-    lock_guard<std::mutex> lock(db_mutex);
+    shared_lock<std::shared_mutex> lock(db_mutex);
     string key;
     ISS >> key; 
     
@@ -60,7 +71,7 @@ void handle_set(istringstream &ISS, shared_ptr<ClientContext> client_context) {
         return;
     }
     SOCKET client_socket = client_context-> socket;
-    lock_guard<std::mutex> lock(db_mutex);
+    unique_lock<std::shared_mutex> lock(db_mutex);
     string key, value;
     ISS >> key >> value;
     if (key.empty()) {
@@ -85,7 +96,7 @@ void handle_compact(istringstream &ISS, shared_ptr<ClientContext> client_context
         return;
     }
     SOCKET client_socket = client_context-> socket;
-    lock_guard<std::mutex> lock(db_mutex);
+    unique_lock<std::shared_mutex> lock(db_mutex);
     ofstream TempFile("wal.tmp");
     if (!TempFile.is_open()) {
         send_response(client_socket, "ERR: Error Opening Temp File\n");
@@ -113,7 +124,7 @@ void handle_delete(istringstream &ISS, shared_ptr<ClientContext> client_context)
     }
     SOCKET client_socket = client_context -> socket;
     {
-        lock_guard<std::mutex> lock(db_mutex);
+        unique_lock<std::shared_mutex> lock(db_mutex);
         string key;
         ISS >> key;
         memTable.erase(key);
@@ -206,31 +217,73 @@ void initWal() {
     }
 }
 
+void disconnect_client(shared_ptr<ClientContext> client_context) {
+    SOCKET client_socket = client_context->socket;
+
+    {
+        lock_guard<mutex> lock(client_context->mtx);
+        if (!client_context->connected) {
+            return;
+        }
+        client_context->connected = false;
+        client_context->queued = false;
+    }
+
+    {
+        lock_guard<mutex> lock(pubsub_mutex);
+        for (auto& [channel, subscribers] : channel_map) {
+            subscribers.erase(
+                remove(subscribers.begin(), subscribers.end(), client_socket),
+                subscribers.end()
+            );
+        }
+    }
+
+    {
+        lock_guard<mutex> lock(clients_mutex);
+        clients.erase(
+            remove(clients.begin(), clients.end(), client_context),
+            clients.end()
+        );
+    }
+
+    closesocket(client_socket);
+}
+
 void workerFunction(shared_ptr<ClientContext> client_context) {
     SOCKET client_socket = client_context->socket;
-    string accumulator = "";
-    while (true) {
-        char buffer[512];
-        memset(buffer, 0, sizeof(buffer));
-        int bytes_received = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
-        if (bytes_received <= 0) { 
-            cout << "Client disconnected." << endl;
-            
-            {
-                lock_guard<std::mutex> lock(pubsub_mutex);
-                for (auto& [channel, vec] : channel_map) {
-                    vec.erase(remove(vec.begin(), vec.end(), client_socket), vec.end());
-                }
-            }
-            closesocket(client_socket);
-            break;
+    auto finish_client_event = [&]() {
+        lock_guard<mutex> lock(client_context->mtx);
+        if (client_context->connected) {
+            client_context->queued = false;
         }
-        accumulator.append(buffer, bytes_received);
+    };
 
-        size_t newline_pos;
-        while ((newline_pos = accumulator.find("\n")) != string::npos) {
-            string currentLine = accumulator.substr(0, newline_pos);
-            accumulator.erase(0, newline_pos+1);
+    char buffer[512];
+    int bytes_received = recv(client_socket, buffer, sizeof(buffer), 0);
+
+    if (bytes_received == 0) {
+        disconnect_client(client_context);
+        return;
+    }
+
+    if (bytes_received == SOCKET_ERROR) {
+        int error = WSAGetLastError();
+        if (error != WSAEWOULDBLOCK && error != WSAEINTR) {
+            cerr << "Socket receive failed: " << error << '\n';
+            disconnect_client(client_context);
+        } else {
+            finish_client_event();
+        }
+        return;
+    }
+
+    client_context->accumulator.append(buffer, bytes_received);
+
+    size_t newline_pos;
+    while ((newline_pos = client_context->accumulator.find("\n")) != string::npos) {
+        string currentLine = client_context->accumulator.substr(0, newline_pos);
+        client_context->accumulator.erase(0, newline_pos + 1);
             if (!currentLine.empty() && currentLine.back() == '\r') {
                 currentLine.pop_back();
             }
@@ -241,7 +294,7 @@ void workerFunction(shared_ptr<ClientContext> client_context) {
 
                 if (command == "EXIT") {
                     send_response(client_socket, "Bye!\n");
-                    closesocket(client_socket);
+                    disconnect_client(client_context);
                     return;
                 }
 
@@ -262,8 +315,9 @@ void workerFunction(shared_ptr<ClientContext> client_context) {
                     }
                 }
             }
-        }
     }
+
+    finish_client_event();
 }
 void workerLoop() {
     while (true) {
@@ -274,22 +328,95 @@ void workerLoop() {
         active_worker_count--;
     }
 }
-int acceptFunction(SOCKET server_socket, vector<thread> thread_pool) {
+void pollLoop() {
+    while (true) {
+        vector<shared_ptr<ClientContext>> client_snapshot;
+        {
+            lock_guard<mutex> lock(clients_mutex);
+            client_snapshot = clients;
+        }
+
+        vector<WSAPOLLFD> poll_fds;
+        vector<shared_ptr<ClientContext>> poll_clients;
+        for (const auto& client : client_snapshot) {
+            lock_guard<mutex> lock(client->mtx);
+            if (!client->connected || client->queued) {
+                continue;
+            }
+
+            WSAPOLLFD poll_fd{};
+            poll_fd.fd = client->socket;
+            poll_fd.events = POLLRDNORM;
+            poll_fds.push_back(poll_fd);
+            poll_clients.push_back(client);
+        }
+
+        if (poll_fds.empty()) {
+            this_thread::sleep_for(chrono::milliseconds(1));
+            continue;
+        }
+
+        int poll_result = WSAPoll(
+            poll_fds.data(), static_cast<ULONG>(poll_fds.size()), 1000
+        );
+        if (poll_result == SOCKET_ERROR) {
+            int error = WSAGetLastError();
+            if (error != WSAEINTR) {
+                cerr << "Socket poll failed: " << error << '\n';
+            }
+            continue;
+        }
+
+        for (size_t i = 0; i < poll_fds.size(); i++) {
+            const auto& client = poll_clients[i];
+
+            if (poll_fds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+                disconnect_client(client);
+                continue;
+            }
+
+            if (poll_fds[i].revents & POLLRDNORM) {
+                bool should_enqueue = false;
+                {
+                    lock_guard<mutex> lock(client->mtx);
+                    if (client->connected && !client->queued) {
+                        client->queued = true;
+                        should_enqueue = true;
+                    }
+                }
+
+                if (should_enqueue) {
+                    workers_queue.enqueue(client);
+                }
+            }
+        }
+    }
+}
+
+int acceptFunction(SOCKET server_socket) {
     while (true) {
         sockaddr_in clientaddr;
         int clientaddr_size = sizeof(clientaddr);
         SOCKET client_socket = accept(server_socket, (sockaddr*)&clientaddr, &clientaddr_size);
-        auto client = std::make_shared<ClientContext>(ClientContext{ client_socket, ClientState::COMMAND_MODE });
-        
         if (client_socket == INVALID_SOCKET) {
             cout << "ACCEPT FAILED: " << WSAGetLastError() << "\n";
             continue;
         }
 
-        workers_queue.enqueue(client);
-        cout << "Socket Waiting in Queue. \n";
+        setSocketNonBlocking(client_socket);
+        auto client = make_shared<ClientContext>();
+        client->socket = client_socket;
+
+        lock_guard<mutex> lock(clients_mutex);
+        clients.push_back(client);
     }
 }
+
+void setSocketNonBlocking(SOCKET socket) {
+    u_long mode = 1;
+    ioctlsocket(socket, FIONBIO, &mode);
+}
+
 int main() {
     initWal();
 
@@ -332,8 +459,10 @@ int main() {
         thread_pool.emplace_back(workerLoop);
     }
 
+    thread pt(pollLoop);
     thread at(acceptFunction, server_socket);
     at.join();
+    pt.join();
     
 
     closesocket(server_socket);

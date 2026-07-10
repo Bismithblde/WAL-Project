@@ -4,7 +4,7 @@ CXXFLAGS = -O2 -DNDEBUG -Iinclude
 LIBS = -lws2_32
 
 # Find all .cpp files in the src directory
-SRCS = src/main.cpp
+SRCS = src/main.cpp src/ThreadSafeQueue.cpp
 
 # Target to build the executable
 main: $(SRCS)
