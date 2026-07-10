@@ -10,6 +10,7 @@
 #include <vector>
 #include <algorithm>
 #include <queue>
+#include <ThreadSafeQueue.h>
 using namespace std;
 
 enum class ClientState {
@@ -27,8 +28,8 @@ unordered_map<string, function<void(istringstream&, shared_ptr<ClientContext>)>>
 unordered_map<string, vector<SOCKET>> channel_map;
 std::mutex db_mutex;
 std::mutex pubsub_mutex;
-queue<shared_ptr<ClientContext>> workers_queue;
-
+ThreadSafeQueue workers_queue;
+atomic<int> active_worker_count(0);
 
 
 // Test-NetConnection 127.0.0.1 -Port 6379
@@ -264,7 +265,31 @@ void workerFunction(shared_ptr<ClientContext> client_context) {
         }
     }
 }
+void workerLoop() {
+    while (true) {
+        // dequeue handles empty, waits until queue has something
+        auto client = workers_queue.dequeue();
+        active_worker_count++;
+        workerFunction(client);
+        active_worker_count--;
+    }
+}
+int acceptFunction(SOCKET server_socket, vector<thread> thread_pool) {
+    while (true) {
+        sockaddr_in clientaddr;
+        int clientaddr_size = sizeof(clientaddr);
+        SOCKET client_socket = accept(server_socket, (sockaddr*)&clientaddr, &clientaddr_size);
+        auto client = std::make_shared<ClientContext>(ClientContext{ client_socket, ClientState::COMMAND_MODE });
+        
+        if (client_socket == INVALID_SOCKET) {
+            cout << "ACCEPT FAILED: " << WSAGetLastError() << "\n";
+            continue;
+        }
 
+        workers_queue.enqueue(client);
+        cout << "Socket Waiting in Queue. \n";
+    }
+}
 int main() {
     initWal();
 
@@ -301,23 +326,19 @@ int main() {
 
     cout << "Server boot complete. Awaiting client lines...\n";
 
-    while (true) {
-        sockaddr_in clientaddr;
-        int clientaddr_size = sizeof(clientaddr);
-        SOCKET client_socket = accept(server_socket, (sockaddr*)&clientaddr, &clientaddr_size);
-        auto client = std::make_shared<ClientContext>(ClientContext{ client_socket, ClientState::COMMAND_MODE });
-        
-        if (client_socket == INVALID_SOCKET) {
-            cout << "ACCEPT FAILED: " << WSAGetLastError() << "\n";
-            continue;
-        }
-        workers_queue.push(client);
-        cout << "Socket Waiting in Queue. \n";
-        thread wt(workerFunction, client);
-        wt.detach();
+    vector<thread> thread_pool;
+
+    for (int i = 0; i < thread::hardware_concurrency(); i++) {
+        thread_pool.emplace_back(workerLoop);
     }
+
+    thread at(acceptFunction, server_socket);
+    at.join();
+    
 
     closesocket(server_socket);
     WSACleanup();
+
+
     return 0;
 }
